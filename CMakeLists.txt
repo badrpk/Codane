@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(codane VERSION 0.1.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+add_library(codane_lib
+  src/json.cpp src/process.cpp src/journal.cpp src/graph.cpp src/agent.cpp
+  src/codex_provider.cpp src/verifier.cpp src/loop.cpp src/runtime.cpp)
+target_include_directories(codane_lib PUBLIC include)
+target_compile_options(codane_lib PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(codane src/main.cpp)
+target_link_libraries(codane PRIVATE codane_lib)
+enable_testing()
+add_executable(codane_tests tests/test_main.cpp)
+target_link_libraries(codane_tests PRIVATE codane_lib)
+add_test(NAME codane_tests COMMAND codane_tests)

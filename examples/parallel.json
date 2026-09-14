@@ -1,0 +1,1 @@
+{"name":"parallel","max_parallel":2,"nodes":[{"id":"a","type":"agent","prompt":"a"},{"id":"b","type":"agent","prompt":"b"},{"id":"join","type":"agent","depends_on":["a","b"],"prompt":"join"}]}

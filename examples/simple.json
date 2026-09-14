@@ -1,0 +1,1 @@
+{"name":"simple","max_parallel":2,"nodes":[{"id":"plan","type":"agent","prompt":"Create a plan."},{"id":"verify","type":"command","depends_on":["plan"],"command":["true"]}]}
