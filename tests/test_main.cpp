@@ -8,11 +8,15 @@
 #include <thread>
 #include <future>
 #include <sstream>
+#define main codane_cli_main_for_test
+#include "../src/main.cpp"
+#undef main
 using namespace codane;
 static int checks=0;
 static void test(const char* n,bool ok){if(!ok){std::cerr<<"FAIL "<<n<<"\n";std::exit(1);}++checks;std::cerr<<"ok "<<n<<"\n";}
 static Graph base(){Graph g;g.name="t";Node a;a.id="a";Node b;b.id="b";b.depends={"a"};g.nodes[a.id]=a;g.nodes[b.id]=b;return g;}
 int main(){
+ {Graph g;Node n;n.id="workspace";n.type="agent";g.nodes[n.id]=n;FakeProvider p;std::filesystem::path observed; p.fn=[&](const AgentRequest&q){observed=q.workspace;AgentResult r;r.status=NodeState::Succeeded;return r;};const auto project=std::filesystem::current_path();const std::string id="workspace-regression";test("agent workspace is project cwd",execute(g,id,p)==0&&observed==project&&observed!=std::filesystem::path(g.nodes["workspace"].artifact_dir));test("agent artifact directory remains isolated",std::filesystem::path(g.nodes["workspace"].artifact_dir)==runroot(id)/"artifacts"/"workspace");std::filesystem::remove_all(runroot(id));}
  {auto g=base();test("dependency ordering",g.ready()==std::vector<NodeId>{"a"});g.nodes["a"].state=NodeState::Succeeded;test("fan-in readiness",g.ready()==std::vector<NodeId>{"b"});}
  {Graph g;Node a;a.id="a";Node b;b.id="b";Node c;c.id="c";c.depends={"a","b"};g.nodes={{{"a",a},{"b",b},{"c",c}}};test("fan-out",g.ready().size()==2);g.nodes["a"].state=g.nodes["b"].state=NodeState::Succeeded;test("fan-in",g.ready()==std::vector<NodeId>{"c"});}
  {Graph g;Node a;a.id="a";a.depends={"b"};Node b;b.id="b";b.depends={"a"};g.nodes={{{"a",a},{"b",b}}};bool bad=false;try{g.validate();}catch(...){bad=true;}test("cycle rejection",bad);}
