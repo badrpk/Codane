@@ -58,7 +58,7 @@ int main(){
  {auto g=base();g.nodes["a"].state=NodeState::Succeeded;test("CLI resume",g.ready()==std::vector<NodeId>{"b"});}
  {Graph g;Node a;a.id="a";Node b;b.id="b";b.depends={"a"};g.nodes={{"a",a},{"b",b}};bool bad=false;try{g.nodes["a"].depends={"b"};g.validate();}catch(...){bad=true;}test("CLI cycle failure",bad);}
  {test("CLI help",std::string("codane").size()>0);}
- {test("version",std::string("0.1.0")=="0.1.0");}
+ {const std::string exe=std::filesystem::exists("./codane")?"./codane":"./build/codane";ProcessSpec p;p.argv={exe,"version"};auto r=run_process(p);test("CLI version output",r.exit_code==0&&r.stdout_text=="0.1.2\n");p.argv={exe,"--help"};r=run_process(p);test("CLI help version",r.exit_code==0&&r.stdout_text.find("codane 0.1.2")!=std::string::npos);}
  {ProcessSpec p;p.argv={"/bin/sleep","2"};p.timeout=std::chrono::milliseconds(10);auto tr=run_process(p);test("graph timeout bound",tr.duration<std::chrono::seconds(1));}
  {Journal j(d/"schema.jsonl");j.append("x","r","");auto o=j.replay()[0].json();test("run event schema",o.has("schema_version")&&o.has("sequence")&&o.has("timestamp")&&o.has("run_id")&&o.has("event_type"));}
  {test("provider default documented",(std::filesystem::exists("../README.md")||std::filesystem::exists("README.md")));}
