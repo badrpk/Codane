@@ -1,0 +1,3 @@
+#include "codane/verifier.hpp"
+#include <fstream>
+namespace codane {bool CommandVerifier::verify(std::string*e){auto r=run_process(p);if(r.exit_code!=0){if(e)*e=r.stderr_text;return false;}return true;}bool FileExistsVerifier::verify(std::string*e){bool x=std::filesystem::exists(p);if(!x&&e)*e="missing "+p.string();return x;}bool FileContentVerifier::verify(std::string*e){std::ifstream f(p);std::string x((std::istreambuf_iterator<char>(f)),{});bool ok=x==expected;if(!ok&&e)*e="content mismatch";return ok;}bool AllOfVerifier::verify(std::string*e){for(auto&v:vs)if(!v->verify(e))return false;return true;}}

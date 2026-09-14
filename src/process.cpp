@@ -1,0 +1,12 @@
+#include "codane/process.hpp"
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/poll.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <algorithm>
+namespace codane {
+static void nb(int f){fcntl(f,F_SETFL,fcntl(f,F_GETFL,0)|O_NONBLOCK);}
+ProcessResult run_process(const ProcessSpec&s){if(s.argv.empty())throw std::invalid_argument("empty argv");auto t=Clock::now();int in[2],out[2],err[2];if(pipe(in)||pipe(out)||pipe(err))throw std::system_error(errno,std::generic_category());pid_t p=fork();if(p==0){setpgid(0,0);dup2(in[0],0);dup2(out[1],1);dup2(err[1],2);close(in[1]);close(out[0]);close(err[0]);if(!s.cwd.empty())chdir(s.cwd.c_str());for(auto const&[k,v]:s.environment)setenv(k.c_str(),v.c_str(),1);std::vector<char*> a;for(auto&x:const_cast<std::vector<std::string>&>(s.argv))a.push_back(x.data());a.push_back(nullptr);execvp(a[0],a.data());_exit(127);}if(p<0)throw std::system_error(errno,std::generic_category());close(in[0]);close(out[1]);close(err[1]);nb(in[1]);nb(out[0]);nb(err[0]);size_t sent=0;ProcessResult r;bool term=false;auto deadline=t+s.timeout;auto term_at=t;for(;;){if((s.stop.stop_requested()||(!s.cancel_file.empty()&&std::filesystem::exists(s.cancel_file)))&&!term){r.cancelled=true;kill(-p,SIGTERM);term=true;term_at=Clock::now();}if(!term&&s.timeout.count()>0&&Clock::now()>=deadline){kill(-p,SIGTERM);term=true;term_at=Clock::now();}pollfd fds[3]={{in[1],POLLOUT,0},{out[0],POLLIN,0},{err[0],POLLIN,0}};int n=poll(fds,3,50);if(n>0){if(fds[0].revents){ssize_t z=write(in[1],s.stdin_text.data()+sent,s.stdin_text.size()-sent);if(z>0)sent+=z;if(sent==s.stdin_text.size()){close(in[1]);fds[0].fd=-1;}}for(int k=1;k<3;k++)if(fds[k].revents){char b[4096];ssize_t z=read(fds[k].fd,b,sizeof b);if(z>0){auto&x=k==1?r.stdout_text:r.stderr_text;auto lim=k==1?s.max_stdout:s.max_stderr;if(x.size()+z>lim){x.append(b,lim-x.size());if(k==1)r.stdout_truncated=true;else r.stderr_truncated=true;}else x.append(b,z);}else if(z==0){close(fds[k].fd);fds[k].fd=-1;}}}int st=0;pid_t w=waitpid(p,&st,WNOHANG);if(w==p){if(WIFEXITED(st))r.exit_code=WEXITSTATUS(st);if(WIFSIGNALED(st))r.signal=WTERMSIG(st);if(w==p){if(fds[1].fd>=0)close(fds[1].fd);if(fds[2].fd>=0)close(fds[2].fd);break;}}if(term&&Clock::now()>term_at+std::chrono::milliseconds(1000)){kill(-p,SIGKILL);waitpid(p,&st,0);if(WIFSIGNALED(st))r.signal=WTERMSIG(st);break;}}r.duration=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-t);return r;}
+}

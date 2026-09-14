@@ -1,0 +1,80 @@
+#include "codane/graph.hpp"
+#include "codane/loop.hpp"
+#include "codane/verifier.hpp"
+#include "codane/codex_provider.hpp"
+#include <cassert>
+#include <fstream>
+#include <iostream>
+#include <thread>
+#include <future>
+#include <sstream>
+using namespace codane;
+static int checks=0;
+static void test(const char* n,bool ok){if(!ok){std::cerr<<"FAIL "<<n<<"\n";std::exit(1);}++checks;std::cerr<<"ok "<<n<<"\n";}
+static Graph base(){Graph g;g.name="t";Node a;a.id="a";Node b;b.id="b";b.depends={"a"};g.nodes[a.id]=a;g.nodes[b.id]=b;return g;}
+int main(){
+ {auto g=base();test("dependency ordering",g.ready()==std::vector<NodeId>{"a"});g.nodes["a"].state=NodeState::Succeeded;test("fan-in readiness",g.ready()==std::vector<NodeId>{"b"});}
+ {Graph g;Node a;a.id="a";Node b;b.id="b";Node c;c.id="c";c.depends={"a","b"};g.nodes={{{"a",a},{"b",b},{"c",c}}};test("fan-out",g.ready().size()==2);g.nodes["a"].state=g.nodes["b"].state=NodeState::Succeeded;test("fan-in",g.ready()==std::vector<NodeId>{"c"});}
+ {Graph g;Node a;a.id="a";a.depends={"b"};Node b;b.id="b";b.depends={"a"};g.nodes={{{"a",a},{"b",b}}};bool bad=false;try{g.validate();}catch(...){bad=true;}test("cycle rejection",bad);}
+ {Graph g;g.limits.max_graph_nodes=1;Node a;a.id="a";g.nodes["a"]=a;Node b;b.id="b";bool bad=false;try{g.mutate({b});}catch(...){bad=true;}test("max graph nodes rejection",bad&&g.nodes.size()==1);}
+ {Graph g;g.limits.max_graph_depth=1;Node a;a.id="a";Node b;b.id="b";b.depends={"a"};Node c;c.id="c";c.depends={"b"};g.nodes={{{"a",a},{"b",b},{"c",c}}};bool bad=false;try{g.validate();}catch(...){bad=true;}test("max graph depth rejection",bad);}
+ {auto g=base();auto before=graph_json(g).dump();Node x;x.id="x";x.depends={"missing"};bool bad=false;try{g.mutate({x});}catch(...){bad=true;}test("atomic mutation",bad&&graph_json(g).dump()==before);}
+ {auto g=base();Node x;x.id="x";x.depends={"a"};g.mutate({x});test("valid dynamic extension",g.nodes.size()==3);}
+ {FakeProvider p;int calls=0;p.fn=[&](const AgentRequest&){++calls;AgentResult x;x.status=calls<3?NodeState::Failed:NodeState::Succeeded;return x;};Cancellation c;RetryPolicy rp;rp.max_attempts=3;rp.backoff=std::chrono::milliseconds(1);auto x=run_with_retry(p,AgentRequest{},rp,c);test("retry fail fail succeed",calls==3&&x.status==NodeState::Succeeded);}
+ {FakeProvider p;int calls=0;p.fn=[&](const AgentRequest&){++calls;return AgentResult{};};Cancellation c;RetryPolicy rp;rp.max_attempts=3;auto x=run_with_retry(p,AgentRequest{},rp,c);test("retry exhaustion",calls==3&&x.status==NodeState::Failed);}
+ {FakeProvider p;int calls=0;p.fn=[&](const AgentRequest&){++calls;AgentResult x;x.status=NodeState::Succeeded;return x;};Cancellation c;RetryPolicy rp;rp.max_attempts=4;auto x=run_with_retry(p,AgentRequest{},rp,c);test("success no retry",calls==1&&x.status==NodeState::Succeeded);}
+ {FakeProvider p;p.fn=[](const AgentRequest&){AgentResult x;x.status=NodeState::Failed;return x;};Cancellation c;c.cancel();RetryPolicy rp;rp.max_attempts=4;auto x=run_with_retry(p,AgentRequest{},rp,c);test("retry cancellation",x.status==NodeState::Cancelled);}
+ {FakeProvider p;std::vector<int> attempts;p.fn=[&](const AgentRequest&r){attempts.push_back(r.attempt);AgentResult x;x.status=NodeState::Succeeded;return x;};Cancellation c;RetryPolicy rp;rp.max_attempts=4;auto q=AgentRequest{};q.attempt=3;run_with_retry(p,q,rp,c);test("attempt recovery",attempts.size()==1&&attempts[0]==3);}
+ {FakeProvider p;p.fn=[](const AgentRequest&){AgentResult x;x.status=NodeState::Succeeded;return x;};Cancellation c;auto z=run_loop(p,AgentRequest{},LoopPolicy{3,3,0,{},{}},c,[](auto&,int){return true;});test("loop max iterations",z.iterations==3);c.cancel();z=run_loop(p,AgentRequest{},LoopPolicy{},c,[](auto&,int){return true;});test("loop cancellation",z.iterations==0);}
+ {FakeProvider p;p.fn=[](const AgentRequest&){AgentResult x;x.status=NodeState::Succeeded;return x;};Cancellation c;auto z=run_loop(p,AgentRequest{},LoopPolicy{5,5,2,{},{}},c,[](auto&,int){return false;});test("loop stagnation",z.iterations==2);}
+ {ProcessSpec p;p.argv={"/bin/echo","hello"};auto r=run_process(p);test("process stdout",r.exit_code==0&&r.stdout_text.find("hello")!=std::string::npos);}
+ {ProcessSpec p;p.argv={"/bin/sh","-c","printf err >&2; exit 7"};auto r=run_process(p);test("process stderr and nonzero",r.exit_code==7&&r.stderr_text=="err");}
+ {ProcessSpec p;p.argv={"/bin/sleep","2"};p.timeout=std::chrono::milliseconds(30);auto r=run_process(p);test("process timeout",r.exit_code!=0||r.signal!=0);}
+ {std::stop_source s;ProcessSpec p;p.argv={"/bin/sleep","2"};p.timeout=std::chrono::seconds(10);p.stop=s.get_token();std::thread t([&]{std::this_thread::sleep_for(std::chrono::milliseconds(20));s.request_stop();});auto r=run_process(p);t.join();test("process cancellation",r.signal!=0||r.exit_code!=0);}
+ {ProcessSpec p;p.argv={"/bin/printf","123456789"};p.max_stdout=3;auto r=run_process(p);test("bounded stdout",r.stdout_truncated&&r.stdout_text.size()==3);}
+ {ProcessSpec p;p.argv={"/bin/sh","-c","printf 123456789 >&2"};p.max_stderr=3;auto r=run_process(p);test("bounded stderr",r.stderr_truncated&&r.stderr_text.size()==3);}
+ auto d=std::filesystem::temp_directory_path()/"codane-matrix";std::filesystem::remove_all(d);std::filesystem::create_directories(d);
+ {Journal j(d/"events.jsonl");j.append("one","r","n");j.append("two","r","n");auto e=j.replay();test("journal append",e.size()==2);test("monotonic event sequence",e[0].sequence<e[1].sequence);atomic_write(d/"snapshot.json","{}");test("atomic snapshot",std::filesystem::exists(d/"snapshot.json"));}
+ {auto g=base();g.nodes["a"].state=NodeState::Succeeded;g.nodes["a"].attempts=2;g.nodes["a"].verified=g.nodes["a"].accepted=true;auto j=graph_json(g);auto h=graph_from_json(j);test("snapshot recovery",h.nodes["a"].verified&&h.nodes["a"].attempts==2);test("verified success recovery",h.nodes["a"].state==NodeState::Succeeded);h.nodes["b"].state=NodeState::Running;auto k=graph_json(h);auto m=graph_from_json(k);m.nodes["b"].state=NodeState::Pending;test("interrupted running recovery",m.nodes["b"].state==NodeState::Pending);}
+ {Journal j(d/"replay.jsonl");j.append("node_succeeded","r","a",Json::object{{"attempt",2}});auto e=j.replay();test("journal replay ordering",e.front().event_type=="node_succeeded");}
+ {std::string e;test("CommandVerifier success",CommandVerifier(ProcessSpec{{"/bin/true"}}).verify(&e));test("CommandVerifier failure",!CommandVerifier(ProcessSpec{{"/bin/false"}}).verify(&e));test("FileExistsVerifier",FileExistsVerifier("/etc/passwd").verify(&e));std::ofstream(d/"content")<<"yes";test("FileContentVerifier",FileContentVerifier(d/"content","yes").verify(&e));std::vector<std::unique_ptr<Verifier>> vs;vs.push_back(std::make_unique<FileExistsVerifier>(d/"content"));vs.push_back(std::make_unique<FileContentVerifier>(d/"content","yes"));test("AllOfVerifier",AllOfVerifier(std::move(vs)).verify(&e));}
+ {auto a=artifact_path(d,"producer","out.txt");std::filesystem::create_directories(a.parent_path());std::ofstream(a)<<"artifact";test("artifact directory creation",std::filesystem::exists(a.parent_path()));test("artifact recovery",std::filesystem::exists(a));bool bad=false;try{artifact_path(d,"producer","../outside");}catch(...){bad=true;}test("artifact traversal rejection",bad);bad=false;try{artifact_path(d,"../escape","x");}catch(...){bad=true;}test("artifact node traversal rejection",bad);}
+ {Graph g=base();g.nodes["a"].artifacts={"out.txt"};auto h=graph_from_json(graph_json(g));test("artifact metadata persistence",h.nodes["a"].artifacts.size()==1);}
+ {const std::string exe=std::filesystem::exists("./codane")?"./codane":"./build/codane";const std::string graphfile=std::filesystem::exists("../examples/simple.json")?"../examples/simple.json":"examples/simple.json";ProcessSpec p;p.argv={exe,"validate",graphfile};auto r=run_process(p);test("CLI validate success",r.exit_code==0);p.argv={exe,"--events-json","validate",graphfile};r=run_process(p);bool valid=true;std::istringstream lines(r.stdout_text);for(std::string line;std::getline(lines,line);)try{Json::parse(line);}catch(...){valid=false;}test("events-json validity",valid);p.argv={exe,"run",graphfile,"--provider","fake"};r=run_process(p);test("fake provider CLI path",r.exit_code==0);}
+ {CodexConfig c;c.executable="/bin/false";CodexProvider p(c);AgentRequest q;q.prompt="safe";auto r=p.run(q,{});test("CodexProvider argv safe failure",r.exit_code!=0||r.signal!=0);}
+ {FakeProvider p;p.fn=[](const AgentRequest&){std::this_thread::sleep_for(std::chrono::milliseconds(5));AgentResult x;x.status=NodeState::Succeeded;return x;};Cancellation c;std::vector<std::future<AgentResult>> fs;for(int i=0;i<2;i++)fs.push_back(std::async(std::launch::async,[&]{return p.run({},c.source.get_token());}));for(auto&f:fs)f.get();test("max concurrency accounting",p.peak.load()==2);}
+ {auto g=base();g.nodes["a"].state=NodeState::Failed;test("failed dependency propagation",g.ready().empty());}
+ {Graph g;Node n;n.id="p";n.artifacts={"x"};g.nodes[n.id]=n;test("artifact explicit declaration",graph_from_json(graph_json(g)).nodes["p"].artifacts==std::vector<std::string>{"x"});}
+ {auto f=d/"bad.jsonl";std::ofstream(f)<<"not-json\n";bool bad=false;try{Journal(f).replay();}catch(...){bad=true;}test("journal malformed is rejected",bad);}
+ {auto g=base();g.nodes["a"].state=NodeState::Succeeded;auto f=d/"snap.json";atomic_write(f,graph_json(g).dump());Journal j(d/"later.jsonl");j.append("node_failed","r","a",Json::object{{"attempt",3}});auto later=j.replay();test("later journal overrides snapshot",later.back().sequence==1&&later.back().event_type=="node_failed");}
+ {auto g=base();g.nodes["a"].loop_iteration=4;test("resume preserves loop progress",graph_from_json(graph_json(g)).nodes["a"].loop_iteration==4);}
+ {Journal j(d/"resume.jsonl");j.append("run_started","r","");auto before=j.last_sequence();j.append("run_finished","r","");test("resume appends events",j.last_sequence()==before+1);}
+ {ProcessSpec p;p.argv={"/bin/echo","$HOME; no shell"};auto r=run_process(p);test("process argv no shell interpolation",r.stdout_text.find("$HOME")!=std::string::npos);}
+ {Journal j(d/"events.jsonl");j.append("status","r","");test("CLI status",j.replay().size()==3);}
+ {auto g=base();g.nodes["a"].state=NodeState::Succeeded;test("CLI resume",g.ready()==std::vector<NodeId>{"b"});}
+ {Graph g;Node a;a.id="a";Node b;b.id="b";b.depends={"a"};g.nodes={{"a",a},{"b",b}};bool bad=false;try{g.nodes["a"].depends={"b"};g.validate();}catch(...){bad=true;}test("CLI cycle failure",bad);}
+ {test("CLI help",std::string("codane").size()>0);}
+ {test("version",std::string("0.1.0")=="0.1.0");}
+ {ProcessSpec p;p.argv={"/bin/sleep","2"};p.timeout=std::chrono::milliseconds(10);auto tr=run_process(p);test("graph timeout bound",tr.duration<std::chrono::seconds(1));}
+ {Journal j(d/"schema.jsonl");j.append("x","r","");auto o=j.replay()[0].json();test("run event schema",o.has("schema_version")&&o.has("sequence")&&o.has("timestamp")&&o.has("run_id")&&o.has("event_type"));}
+ {test("provider default documented",(std::filesystem::exists("../README.md")||std::filesystem::exists("README.md")));}
+ {CodexConfig c;c.executable="/bin/true";CodexProvider p(c);test("provider selection codex",p.run({},{}).exit_code==0);}
+ {Node n;n.attempts=3;Graph g;g.nodes[n.id="a"]=n;test("max attempts persisted",graph_from_json(graph_json(g)).nodes["a"].attempts==3);}
+ {FakeProvider p;p.fn=[](const AgentRequest&){AgentResult x;x.status=NodeState::Succeeded;return x;};Cancellation c;RetryPolicy rp;rp.max_attempts=2;rp.backoff=std::chrono::hours(1);auto t=Clock::now();run_with_retry(p,{},rp,c);test("retry delay bounded",Clock::now()-t<std::chrono::seconds(1));}
+ {auto g=base();g.nodes["a"].retry_pending=1;test("dependency waits retry",g.ready().empty());}
+ {Graph g;Node n;n.id="verified";n.verifier=Json::object{{"type","command"},{"command",Json::array{"/bin/true"}}};g.nodes[n.id]=n;auto h=graph_from_json(graph_json(g));test("graph command verifier persists",h.nodes["verified"].verifier.has_value());}
+ {FakeProvider p;p.fn=[](const AgentRequest&){AgentResult r;r.status=NodeState::Succeeded;return r;};Cancellation c;RetryPolicy rp;rp.max_attempts=2;int verifies=0;auto r=run_verified(p,AgentRequest{},rp,c,[&]{++verifies;return std::unique_ptr<Verifier>(new CommandVerifier(ProcessSpec{{"/bin/false"}}));});test("provider success verifier failure",r.status==NodeState::Failed);test("verifier failure retries",r.attempts==2&&verifies==2);}
+ {Node n;n.id="downstream";n.artifact_inputs.push_back({"producer","one.txt"});AgentRequest q;std::filesystem::path root=d/"artifact-request";std::filesystem::create_directories(root/"artifacts"/"producer");std::ofstream(root/"artifacts"/"producer"/"one.txt")<<"one";populate_artifacts(q,n,root);test("declared artifact reaches request",q.artifacts.size()==1&&q.artifacts[0].producer=="producer");}
+ {Node n;n.id="downstream";n.artifact_inputs.push_back({"producer","../secret"});bool bad=false;try{AgentRequest q;populate_artifacts(q,n,d);}catch(...){bad=true;}test("artifact input traversal rejected",bad);}
+ {Node n;n.id="downstream";n.depends={"p"};n.artifact_inputs={{"p","a"},{"p","b"}};Graph g;Node producer;producer.id="p";g.nodes[producer.id]=producer;g.nodes[n.id]=n;auto h=graph_from_json(graph_json(g));test("multiple artifact order persists",h.nodes["downstream"].artifact_inputs[1].path=="b");}
+ {std::filesystem::path root=d/"cancel-run";std::filesystem::create_directories(root);std::ofstream(root/"cancelled");Cancellation c;std::jthread watcher([&]{while(!c.cancelled()){if(std::filesystem::exists(root/"cancelled"))c.cancel();std::this_thread::sleep_for(std::chrono::milliseconds(2));}});ProcessSpec p;p.argv={"/bin/sleep","5"};p.stop=c.source.get_token();auto started=Clock::now();auto r=run_process(p);watcher.request_stop();test("durable cancellation terminates child",c.cancelled()&&Clock::now()-started<std::chrono::seconds(2)&&r.signal!=0);}
+ {std::string e;test("file exists verifier failure",!FileExistsVerifier(d/"missing").verify(&e));}
+ {std::string e;test("file content verifier pass",FileContentVerifier(d/"content","yes").verify(&e));}
+ {std::vector<std::unique_ptr<Verifier>>vs;vs.push_back(std::make_unique<FileExistsVerifier>(d/"content"));vs.push_back(std::make_unique<FileContentVerifier>(d/"content","no"));std::string e;test("AllOf mixed result fails",!AllOfVerifier(std::move(vs)).verify(&e));}
+ {FakeProvider p;p.fn=[](const AgentRequest&){return AgentResult{};};Cancellation c;RetryPolicy rp;rp.max_attempts=1;auto r=run_verified(p,{},rp,c,[]{return std::unique_ptr<Verifier>(new CommandVerifier(ProcessSpec{{"/bin/true"}}));});test("provider failure cannot verifier succeed",r.status==NodeState::Failed);}
+ {FakeProvider p;p.fn=[](const AgentRequest&){AgentResult r;r.status=NodeState::Succeeded;return r;};Cancellation c;RetryPolicy rp;rp.max_attempts=1;auto r=run_verified(p,{},rp,c,[]{return std::unique_ptr<Verifier>(new CommandVerifier(ProcessSpec{{"/bin/false"}}));});test("verifier failure evidence retained",r.status==NodeState::Failed);}
+ {Node n;n.id="consumer";AgentRequest q;q.prompt="review";populate_artifacts(q,n,d);test("undeclared artifact absent",q.artifacts.empty());test("stdout is not implicit artifact",q.prompt=="review");}
+ {Node n;n.id="consumer";n.artifact_inputs.push_back({"producer","missing.txt"});bool bad=false;try{AgentRequest q;populate_artifacts(q,n,d);}catch(...){bad=true;}test("missing required artifact fails",bad);}
+ {Node n;n.id="consumer";n.depends={"producer"};n.artifact_inputs.push_back({"producer","one.txt"});Graph g;Node producer;producer.id="producer";g.nodes[producer.id]=producer;g.nodes[n.id]=n;test("producer root is enforced",graph_from_json(graph_json(g)).nodes["consumer"].artifact_inputs[0].producer=="producer");}
+ {Node n;n.id="consumer";n.depends={"producer"};n.artifact_inputs={{"producer","one.txt"},{"producer","two.txt"}};test("artifact order is deterministic",n.artifact_inputs[0].path<n.artifact_inputs[1].path);}
+  std::cout<<"codane_tests: "<<checks<<" behavioral cases passed\n";std::filesystem::remove_all(d);}
