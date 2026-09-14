@@ -17,3 +17,23 @@ add_executable(codane_tests tests/test_main.cpp)
 target_compile_definitions(codane_tests PRIVATE CODANE_VERSION="${PROJECT_VERSION}")
 target_link_libraries(codane_tests PRIVATE codane_lib)
 add_test(NAME codane_tests COMMAND codane_tests)
+
+target_sources(codane_lib PRIVATE
+  src/chat_provider.cpp src/harness_provider.cpp
+  src/provider_registry.cpp src/provider_router.cpp)
+add_executable(codane_chat_tests tests/test_chat.cpp)
+target_link_libraries(codane_chat_tests PRIVATE codane_lib)
+add_test(NAME codane_chat_tests COMMAND codane_chat_tests)
+
+target_sources(codane_lib PRIVATE src/chat_config.cpp src/chat_tui.cpp src/workspace.cpp src/conversation.cpp)
+foreach(suite IN ITEMS config conversation json_chat process_chat chat_tui)
+  add_executable(codane_${suite}_tests tests/test_${suite}.cpp)
+  target_link_libraries(codane_${suite}_tests PRIVATE codane_lib)
+  add_test(NAME codane_${suite}_tests COMMAND codane_${suite}_tests)
+endforeach()
+
+add_executable(codane_http_tests tests/test_http.cpp)
+target_link_libraries(codane_http_tests PRIVATE codane_lib)
+add_test(NAME codane_http_tests COMMAND codane_http_tests)
+
+target_sources(codane_lib PRIVATE src/http_transport.cpp)
