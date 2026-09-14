@@ -1,9 +1,13 @@
 #include "codane/tui.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <sys/wait.h>
 #include <termios.h>
@@ -35,6 +39,38 @@ private:
     termios old_{};
     bool active_ = false;
 };
+
+enum class Key {
+    Unknown,
+    Up,
+    Down,
+    Left,
+    Right,
+    Enter,
+    Backspace,
+    NewFolder,
+    Quit,
+};
+
+Key read_key() {
+    unsigned char ch = 0;
+    if (read(STDIN_FILENO, &ch, 1) != 1) return Key::Quit;
+    if (ch == '\r' || ch == '\n') return Key::Enter;
+    if (ch == 127 || ch == 8) return Key::Backspace;
+    if (ch == 'q' || ch == 'Q') return Key::Quit;
+    if (ch == 'n' || ch == 'N') return Key::NewFolder;
+    if (ch != 27) return Key::Unknown;
+
+    std::array<unsigned char, 2> seq{};
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return Key::Unknown;
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return Key::Unknown;
+    if (seq[0] != '[') return Key::Unknown;
+    if (seq[1] == 'A') return Key::Up;
+    if (seq[1] == 'B') return Key::Down;
+    if (seq[1] == 'C') return Key::Right;
+    if (seq[1] == 'D') return Key::Left;
+    return Key::Unknown;
+}
 
 void clear_screen() {
     std::cout << "\033[2J\033[H" << std::flush;
@@ -86,6 +122,162 @@ int spawn_cli(const std::string& executable, const std::vector<std::string>& arg
     return 1;
 }
 
+bool is_json_file(const std::filesystem::directory_entry& entry) {
+    std::error_code ec;
+    if (!entry.is_regular_file(ec) || ec) return false;
+    auto ext = entry.path().extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return ext == ".json";
+}
+
+struct BrowserEntry {
+    std::filesystem::path path;
+    bool directory = false;
+};
+
+std::vector<BrowserEntry> graph_entries(const std::filesystem::path& directory,
+                                        std::string& error) {
+    std::vector<BrowserEntry> entries;
+    std::error_code ec;
+    std::filesystem::directory_iterator it(directory, ec);
+    if (ec) {
+        error = ec.message();
+        return entries;
+    }
+
+    for (const auto& item : it) {
+        std::error_code type_ec;
+        const bool is_dir = item.is_directory(type_ec);
+        if (type_ec) continue;
+        if (!is_dir && !is_json_file(item)) continue;
+        entries.push_back({item.path(), is_dir});
+    }
+
+    auto lower_name = [](const std::filesystem::path& path) {
+        auto text = path.filename().string();
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return text;
+    };
+    std::sort(entries.begin(), entries.end(), [&](const BrowserEntry& a, const BrowserEntry& b) {
+        if (a.directory != b.directory) return a.directory > b.directory;
+        return lower_name(a.path) < lower_name(b.path);
+    });
+    return entries;
+}
+
+void render_browser(const std::filesystem::path& directory,
+                    const std::vector<BrowserEntry>& entries,
+                    std::size_t selected,
+                    const std::string& message) {
+    constexpr std::size_t page_size = 12;
+    clear_screen();
+    std::cout << "\033[1;36m╔════════════════════════════════════════════╗\n"
+                 "║          CODANE FILE BROWSER              ║\n"
+                 "╚════════════════════════════════════════════╝\033[0m\n";
+    std::cout << "\n  Folder: " << directory.string() << "\n";
+    std::cout << "  Showing folders and JSON graph files\n\n";
+
+    if (entries.empty()) {
+        std::cout << "    (no folders or .json files here)\n";
+    } else {
+        const std::size_t start = selected >= page_size ? selected - page_size + 1 : 0;
+        const std::size_t end = std::min(entries.size(), start + page_size);
+        for (std::size_t i = start; i < end; ++i) {
+            const auto prefix = entries[i].directory ? "[DIR] " : "[JSON]";
+            const auto name = entries[i].path.filename().string();
+            if (i == selected) {
+                std::cout << "\033[7m  > " << prefix << " " << name << "  \033[0m\n";
+            } else {
+                std::cout << "    " << prefix << " " << name << '\n';
+            }
+        }
+        if (entries.size() > page_size) {
+            std::cout << "\n  " << (selected + 1) << "/" << entries.size() << '\n';
+        }
+    }
+
+    if (!message.empty()) std::cout << "\n  \033[1;33m" << message << "\033[0m\n";
+    std::cout << "\n  ↑/↓ move   Enter open/select   ←/Backspace up\n"
+                 "  N new folder                         Q cancel\n"
+              << std::flush;
+}
+
+std::optional<std::filesystem::path> browse_for_graph() {
+    std::error_code ec;
+    std::filesystem::path current = std::filesystem::current_path(ec);
+    if (ec) current = ".";
+    current = std::filesystem::absolute(current, ec);
+    if (ec) current = ".";
+
+    std::size_t selected = 0;
+    std::string message;
+
+    for (;;) {
+        std::string listing_error;
+        auto entries = graph_entries(current, listing_error);
+        if (!listing_error.empty()) message = "Cannot open folder: " + listing_error;
+        if (entries.empty()) selected = 0;
+        else if (selected >= entries.size()) selected = entries.size() - 1;
+
+        Key key = Key::Unknown;
+        {
+            RawMode raw;
+            render_browser(current, entries, selected, message);
+            key = read_key();
+        }
+        message.clear();
+
+        if (key == Key::Quit) return std::nullopt;
+        if (key == Key::Up && !entries.empty()) {
+            selected = selected == 0 ? entries.size() - 1 : selected - 1;
+        } else if (key == Key::Down && !entries.empty()) {
+            selected = (selected + 1) % entries.size();
+        } else if ((key == Key::Left || key == Key::Backspace) && current.has_parent_path()) {
+            const auto parent = current.parent_path();
+            if (parent != current && !parent.empty()) {
+                current = parent;
+                selected = 0;
+            }
+        } else if ((key == Key::Enter || key == Key::Right) && !entries.empty()) {
+            const auto& picked = entries[selected];
+            if (picked.directory) {
+                current = picked.path;
+                selected = 0;
+            } else if (key == Key::Enter) {
+                return picked.path;
+            }
+        } else if (key == Key::NewFolder) {
+            clear_screen();
+            std::cout << "Create folder inside:\n  " << current.string() << "\n\n";
+            const auto name = prompt("Folder name: ");
+            if (name.empty()) {
+                message = "Folder creation cancelled.";
+                continue;
+            }
+            if (name == "." || name == ".." || name.find('/') != std::string::npos ||
+                name.find('\\') != std::string::npos) {
+                message = "Use a simple folder name without / or \\.";
+                continue;
+            }
+            const auto new_dir = current / name;
+            std::error_code create_ec;
+            if (std::filesystem::create_directory(new_dir, create_ec)) {
+                current = new_dir;
+                selected = 0;
+                message = "Folder created.";
+            } else if (create_ec) {
+                message = "Could not create folder: " + create_ec.message();
+            } else {
+                message = "Folder already exists.";
+            }
+        }
+    }
+}
+
 int choose(const std::vector<std::string>& items, int selected, const std::string& provider) {
     RawMode raw;
     for (;;) {
@@ -103,19 +295,13 @@ int choose(const std::vector<std::string>& items, int selected, const std::strin
         }
         std::cout << "\n  ↑/↓ move   Enter select   q exit\n" << std::flush;
 
-        unsigned char ch = 0;
-        if (read(STDIN_FILENO, &ch, 1) != 1) return static_cast<int>(items.size()) - 1;
-        if (ch == 'q' || ch == 'Q') return static_cast<int>(items.size()) - 1;
-        if (ch == '\r' || ch == '\n') return selected;
-        if (ch == 27) {
-            std::array<unsigned char, 2> seq{};
-            if (read(STDIN_FILENO, &seq[0], 1) != 1) continue;
-            if (read(STDIN_FILENO, &seq[1], 1) != 1) continue;
-            if (seq[0] == '[' && seq[1] == 'A') {
-                selected = (selected + static_cast<int>(items.size()) - 1) % static_cast<int>(items.size());
-            } else if (seq[0] == '[' && seq[1] == 'B') {
-                selected = (selected + 1) % static_cast<int>(items.size());
-            }
+        const auto key = read_key();
+        if (key == Key::Quit) return static_cast<int>(items.size()) - 1;
+        if (key == Key::Enter) return selected;
+        if (key == Key::Up) {
+            selected = (selected + static_cast<int>(items.size()) - 1) % static_cast<int>(items.size());
+        } else if (key == Key::Down) {
+            selected = (selected + 1) % static_cast<int>(items.size());
         }
     }
 }
@@ -143,13 +329,19 @@ int run_tui(const std::string& executable) {
         clear_screen();
 
         if (choice == 0) {
-            const auto graph = prompt("Graph JSON path: ");
-            if (!graph.empty()) spawn_cli(executable, {"run", graph, "--provider", provider});
-            pause_after_action();
+            const auto graph = browse_for_graph();
+            if (graph) {
+                clear_screen();
+                spawn_cli(executable, {"run", graph->string(), "--provider", provider});
+                pause_after_action();
+            }
         } else if (choice == 1) {
-            const auto graph = prompt("Graph JSON path: ");
-            if (!graph.empty()) spawn_cli(executable, {"validate", graph});
-            pause_after_action();
+            const auto graph = browse_for_graph();
+            if (graph) {
+                clear_screen();
+                spawn_cli(executable, {"validate", graph->string()});
+                pause_after_action();
+            }
         } else if (choice == 2) {
             const auto id = prompt("Run ID: ");
             if (!id.empty()) spawn_cli(executable, {"resume", id});
