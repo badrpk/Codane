@@ -5,10 +5,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(codane_lib
   src/json.cpp src/process.cpp src/journal.cpp src/graph.cpp src/agent.cpp
-  src/codex_provider.cpp src/verifier.cpp src/loop.cpp src/runtime.cpp)
+  src/codex_provider.cpp src/verifier.cpp src/loop.cpp src/runtime.cpp src/tui.cpp)
 target_include_directories(codane_lib PUBLIC include)
 target_compile_options(codane_lib PRIVATE -Wall -Wextra -Wpedantic)
-add_executable(codane src/main.cpp)
+add_executable(codane src/main.cpp src/entry.cpp)
+set_source_files_properties(src/main.cpp PROPERTIES COMPILE_DEFINITIONS "main=codane_cli_main")
 target_compile_definitions(codane PRIVATE CODANE_VERSION="${PROJECT_VERSION}")
 target_link_libraries(codane PRIVATE codane_lib)
 enable_testing()
